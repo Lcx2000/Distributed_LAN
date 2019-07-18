@@ -1,4 +1,4 @@
-import paramiko,os,sys,time,hashlib,json
+import paramiko,os,sys,time,hashlib,json,urllib,requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -26,13 +26,16 @@ class DirEventHandler(FileSystemEventHandler):
             self.changedFiles["modified"].append(relpath)
 
 class boundNode:
-    def __init__(self,name,IPv4=None,IPv6=None,isLAN=True,targetDir=None,synNum=0):
+    def __init__(self,name,IPv4=None,IPv6=None,serverIP=None,userName='',passWd='',isLAN=True,targetDir=None,synNum=0):
         self.IPv4      = IPv4
         self.IPv6      = IPv6
         self.name      = name
         self.isLAN     = isLAN
         self.targetDir = targetDir
         self.synNum    = synNum
+        self.serverIp  = serverIP
+        self.userName  = userName
+        self.passWd    = passWd
 class blacklist:
     def __init__(self,files=[],suffixs=[],dirs=[]):
         self.specifiedFile   = files
@@ -59,15 +62,18 @@ class fileSynchronizerClass:
         # 初始化self.__changedFiles__ 检测到的需要修改的文件
         with open(configFilePath, "r", encoding='utf-8') as f:
             __configObj__ = json.load(f)
-        self.__boundNode__     =  __configObj__['boundNode']
-        self.__filterMode__    =  __configObj__['filterMode']
-        self.__blacklist__     =  __configObj__['blacklist']
-        self.__whitelist__     =  __configObj__['whitelist']
-        self.__rootDir__       =  __configObj__['rootdir']
-        self.__allFiles__      =  __configObj__['allFiles']
-        self.__concernedFile__ =  __configObj__['concernedFile']
-        self.__changedFiles__  =  __configObj__['changedFiles']
-    
+        self.__boundNode__      =  __configObj__['boundNode']
+        self.__filterMode__     =  __configObj__['filterMode']
+        self.__blacklist__      =  __configObj__['blacklist']
+        self.__whitelist__      =  __configObj__['whitelist']
+        self.__rootDir__        =  __configObj__['rootdir']
+        self.__allFiles__       =  __configObj__['allFiles']
+        self.__concernedFile__  =  __configObj__['concernedFile']
+        self.__changedFiles__   =  __configObj__['changedFiles']
+        self.__mainNodeDomain__ =  __configObj__['mainNodeDomain']
+        self.__mainNodePort__   =  __configObj__['mainNodePort']
+        self.__md5dict__          =   __configObj__['md5dict']
+
     def setRootDir(self,path):
         #设置self.__rootDir__
         self.__rootDir__ = path
@@ -155,31 +161,91 @@ class fileSynchronizerClass:
 
     def __checkNodeByIPv4__(self, IPv4):
         # 通过ping来判断是否在局域网内
+        isInLAN=os.system("ping -n 2 -w 1 %s"% IPv4)
         return isInLAN
     def __checkNodeByIPv6__(self, IPv6):
         #通过ping来判断是否在局域网内
+        isInLAN=os.system("ping -n 2 -w 1 %s"% IPv6)
         return isInLAN
+    def __restfulPOST__(self,value,restfulName):
+        # value为传入的查询参数，为字典类型
+        url = "http://%s:%s/%s"%(self.__mainNodeDomain__,self.__mainNodePort__,restfulName)#
+        # 以下为restful接口要接收的参数，样例为字典形式，也可以是任何可以被序列化为JSON的形式，比如：类
+        data = json.dumps(value) # 将要传输的参数序列化为JSON传输给主节点的Restful接口
+        headers = {
+            'Content-Type':'application/json' # 主节点restful接口统一规范为JSON形式传参，所以此处数据包的内容类型设置为JSON
+        }
+        data = data.encode(encoding='utf-8') # 设置数据的编码格式 
+        req  = urllib.request.Request(url=url,data=data,headers=headers) # 设置请求报文
+        res_data = urllib.request.urlopen(req) # 请求restful
+        returnData = res_data.read().decode("utf-8")# 读取返回数据
+        resObj = json.loads(returnData) # 解析返回JSON为类
+        return resObj
+
     def __queryNode__(self, nodeName):
+        value = {"node_name":nodeName}
+        data  = self.__restfulPOST__(value,"queryNode")
         #通过主节点查询该节点的IPv4和IPv6
-        pass
+        return data
     def bindingNode(self, nodeName):
         #绑定节点
         #通过nodeName，调用self.__queryNodeInfo__(nodeName)来获得该节点的IPv4及IPv6地址
         #测试是否在局域网内
         #最后设置self.__boundNode__
-        (IPv4,IPv6)        = self.__queryNode__
-        isInLAN            = self.__checkNodeByIPv4__(IPv4) or self.__checkNodeByIPv6__(IPv6)
-        self.__boundNode__ = boundNode(IPv4,IPv6,nodeName,isInLAN)
+        data = self.__queryNode__(nodeName)
+        IPv4  = data["IPv4"]
+        IPv6  = data["IPv6"]
+        isLAN = False
+        if self.__checkNodeByIPv4__(IPv4):
+            isLAN    = True
+            serverIP = IPv4
+        elif self.__checkNodeByIPv6__(IPv6):
+            isLAN    = True
+            serverIP = IPv6
+        targetDir = data["targetDir"]
+        synNum    = data["synNum"]
+        userName  = data["userName"]
+        passWd    = data["passWd"]
+        self.__boundNode__ = boundNode(nodeName,IPv4,IPv6,serverIP,userName,passWd,isLAN,targetDir,synNum)
     def updateNode(self, nodeName):
         #更新绑定的节点
         #通过nodeName，调用self.__queryNodeInfo__(nodeName)来获得该节点的IPv4及IPv6地址
         #测试是否在局域网内
         #最后设置self.__boundNode__
-        (IPv4,IPv6)        = self.__queryNode__
-        isInLAN            = self.__checkNodeByIPv4__(IPv4) or self.__checkNodeByIPv6__(IPv6)
-        self.__boundNode__ = boundNode(IPv4,IPv6,nodeName,isInLAN)
-    
-    
+        data = self.__queryNode__(nodeName)
+        IPv4  = data["IPv4"]
+        IPv6  = data["IPv6"]
+        isLAN = False
+        if self.__checkNodeByIPv4__(IPv4):
+            isLAN    = True
+            serverIP = IPv4
+        elif self.__checkNodeByIPv6__(IPv6):
+            isLAN    = True
+            serverIP = IPv6
+        targetDir = data["targetDir"]
+        synNum    = data["synNum"]
+        userName  = data["userName"]
+        passWd    = data["passWd"]
+        self.__boundNode__ = boundNode(nodeName,IPv4,IPv6,serverIP,userName,passWd,isLAN,targetDir,synNum)
+
+    def __dict_get__(self,dict,objkey,flag,data,i):
+        if i<len(objkey)-1:
+            if dict!=None and objkey[i] in dict.keys():
+                return self.__dict_get__(dict[objkey[i]],objkey,True, data,i+1)
+                
+            else:
+                dict[objkey[i]]={}
+                return self.__dict_get__(dict[objkey[i]],objkey,False, data,i+1)
+        else:
+            if objkey[i] in dict.keys():
+                if dict[objkey[i]]!=data:
+                    dict[objkey[i]]=data
+                    return True
+                else:
+                    return False
+            else:
+                dict[objkey[i]]=data
+                return True
     def __synchronize__(self):
         #self.__changedFiles__同步这里面的文件
     #调用用来同步文件
@@ -189,28 +255,41 @@ class fileSynchronizerClass:
 #     1.读取self.__changedFiles__内的文件比对本地和远程对应文件的MD5或SHA-1
 #     2.若远程不存在该文件直接同步
 #     3.若MD5或SHA-1不同才进行同步
-        if self.__boundNode__.isLAN:
-            uploader = fileUploaderClass("192.168.101.57","gdp","glass123456")
-            for file in self.__changedFiles__[modified]:
-                localFile  = os.path.join(self.__rootDir__, file)
-                remoteFile = os.path.join(self.__boundNode__.targetDir, file)
-                flag_exists,remoteFile_md5 = uploader.sshScpGetmd5(remoteFile)
-                if flag_exists:
-                    file = open(localFile,'r')
-                    if hashlib.new('md5', file.read()).hexdigest() != remoteFile_md5:
-                        uploader.sshScpPut(localFile,remoteFile)
-                    file.close()
-                else:
+        for file in self.__changedFiles__[modified]:
+            objkey=file.split("\\")
+            localFile  = os.path.join(self.__rootDir__, file)
+            localfiles = open(localFile,'rb')
+            local_md5  = hashlib.new('md5', localfiles.read()).hexdigest()
+            flag_updata = self.__dict_get__(self.__md5dict__,objkey,True,local_md5,0)
+            if flag_updata:
+                if self.__boundNode__.isLAN:
+                    uploader = fileUploaderClass(self.__boundNode__.serverIp,self.__boundNode__.userName,self.__boundNode__.passWd)
+                    remoteFile = os.path.join(self.__boundNode__.targetDir, file)
                     uploader.sshScpPut(localFile,remoteFile)
-                self.__changedFiles__[modified].remove(file)
-            for file in self.__changedFiles__[moved].keys():
+                #flag_exists,remoteFile_md5 = uploader.sshScpGetmd5(remoteFile)
+                # if flag_exists:
+                #     files = open(localFile,'rb')
+                #     if hashlib.new('md5', files.read()).hexdigest() != remoteFile_md5:
+                #         uploader.sshScpPut(localFile,remoteFile)
+                #     files.close()
+                # else:
+                #     uploader.sshScpPut(localFile,remoteFile)
+                else:
+                    self.__fileUploader__(file)
+
+            self.__changedFiles__[modified].remove(file)
+        for file in self.__changedFiles__[moved].keys():
+            if self.__boundNode__.isLAN:
                 oldpath = os.path.join(self.__boundNode__.targetDir, file)
                 newpath = os.path.join(self.__boundNode__.targetDir, self.__changedFiles__[moved][file])
                 uploader.sshScpRename(oldpath,newpath)
-
-        else:
-            pass
-
+            else:
+                pass
+    def __fileUploader__(self,filePath):
+        value    = {'filepath':os.path.join(self.__boundNode__.targetDir,filePath),'file':open(os.path.join(self.__rootDir__, filePath),'r')}
+        success  = self.__restfulPOST__(value,"fileUploader")
+        #通过主节点查询该节点的IPv4和IPv6
+        return success
 
 
                 
@@ -248,7 +327,7 @@ class fileUploaderClass(object):
         sftp = paramiko.SFTPClient.from_transport(self.__ssh__.get_transport())
         sftp = self.__ssh__.open_sftp() 
         try:
-            file = sftp.open(file_path, 'r')
+            file = sftp.open(file_path, 'rb')
             return (True,hashlib.new('md5', file.read()).hexdigest())
         except:
             return (False,None)
